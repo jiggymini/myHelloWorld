@@ -1,0 +1,59 @@
+version: 2.1
+
+executors:
+  go-executor:
+    docker:
+      - image: circleci/golang:1.12.7-buster-node
+    working_directory: /go/src/bitbucket.org/maqe/pr-hello
+  aws-executor:
+    docker:
+      - image: maqelabs/circleci_node_build:latest
+    working_directory: ~/workspace
+
+jobs:
+  build-and-test:
+    executor: aws-executor
+    steps:
+      - run: git config --global user.name "$CIRCLE_USERNAME"
+      - add_ssh_keys
+      - checkout
+      - setup_remote_docker:
+          version: 18.03.1-ce
+      - run:
+          name: Build Docker Image
+          command: |
+            $(aws ecr get-login --no-include-email)
+            docker build -t ${ECR_REPO}:${CIRCLE_BRANCH} .
+            docker run ${ECR_REPO}:${CIRCLE_BRANCH} go test
+            docker tag ${ECR_REPO}:${CIRCLE_BRANCH} ${ECR_REPO}:${CIRCLE_SHA1}
+            docker push ${ECR_REPO}
+  deploy:
+    machine:
+      enabled: true
+    steps:
+      - run:
+          name: Deploy Over SSH
+          command: |
+            commands="$(aws ecr get-login --no-include-email); \
+              docker pull ${ECR_REPO}:${CIRCLE_BRANCH}; \
+              docker rm -f ${SERVICE_NAME} || true; \
+              docker run -d -p 80:8080 --name ${SERVICE_NAME} ${ECR_REPO}:${CIRCLE_BRANCH}"
+            ssh ubuntu@${EC2_IP} ${commands}
+      
+workflows:
+  version: 2.1
+  build-test-deploy:
+    jobs:
+      - build-and-test:
+          filters:
+            branches:
+              only:
+                - master
+      - deploy:
+          name: deploy
+          requires:
+            - build-and-test
+          filters:
+            branches:
+              only:
+                - master
